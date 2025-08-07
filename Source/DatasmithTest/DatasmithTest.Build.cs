@@ -9,8 +9,7 @@ public class DatasmithTest : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" , "UMG" ,    "Json",
-			"JsonUtilities",    "Sockets",
-			"Networking",});
+			"JsonUtilities", "Sockets", "Networking",});
 
         // Datasmith Runtime Dependencies
         PublicDependencyModuleNames.AddRange(new string[]

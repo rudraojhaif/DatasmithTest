@@ -1,4 +1,15 @@
-﻿#include "DSLightSyncer.h"
+﻿// Copyright (c) 2025 Rudra Ojha
+// All rights reserved.
+//
+// This source code is provided for educational and reference purposes only.
+// Redistribution, modification, or use of this code in any commercial or private
+// product is strictly prohibited without explicit written permission from the author.
+//
+// Unauthorized use in any software or plugin distributed to end-users,
+// whether open-source or commercial, is not allowed.
+//
+// Contact: rudraojhaif@gmail.com for licensing inquiries.
+#include "DSLightSyncer.h"
 
 #include "Engine/DirectionalLight.h"
 #include "Engine/PointLight.h"
@@ -10,40 +21,67 @@
 #include "IPAddress.h"
 #include "Json.h"
 
+/**
+ * @brief Constructor - enables ticking for processing queued TCP data
+ */
 ADSLightSyncer::ADSLightSyncer()
 {
-	PrimaryActorTick.bCanEverTick = true; // Enable ticking to process queued data
+	PrimaryActorTick.bCanEverTick = true; // Enable ticking to process queued data from TCP
 }
 
+/**
+ * @brief Called when the actor begins play
+ * 
+ * Optionally starts the TCP listener immediately. You can also call
+ * StartTcpListener() manually from Blueprint or C++.
+ */
 void ADSLightSyncer::BeginPlay()
 {
 	Super::BeginPlay();
 	
-	// Optionally start listening immediately
+	// Optionally start listening immediately when the game starts
 	// StartTcpListener();
 }
 
+/**
+ * @brief Called when the actor ends play
+ * 
+ * Ensures proper cleanup of TCP connections and spawned lights
+ */
 void ADSLightSyncer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopTcpListener();
+	ClearExistingLights(); // Clean up any spawned lights
 	Super::EndPlay(EndPlayReason);
 }
 
+/**
+ * @brief Called every frame to process queued TCP data
+ * 
+ * Processes any JSON light data received via TCP in the game thread
+ * to ensure thread-safe light spawning and manipulation.
+ */
 void ADSLightSyncer::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	ProcessQueuedData();
+	ProcessQueuedData(); // Process any queued light data from TCP
 }
 
+/**
+ * @brief Starts the TCP listener on the specified port
+ * 
+ * Creates a TCP socket listener that waits for connections from Rhino.
+ * When Rhino sends light data, it's queued for processing in the game thread.
+ */
 void ADSLightSyncer::StartTcpListener()
 {
 	if (bIsListening)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("TCP Listener is already running"));
+		UE_LOG(LogTemp, Warning, TEXT("TCP Listener is already running on port %d"), ListeningPort);
 		return;
 	}
 
-	// Get socket subsystem
+	// Get the platform-specific socket subsystem
 	ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
 	if (!SocketSubsystem)
 	{
@@ -51,20 +89,20 @@ void ADSLightSyncer::StartTcpListener()
 		return;
 	}
 
-	// Create endpoint
+	// Create endpoint to listen on any IP address on the specified port
 	FIPv4Endpoint Endpoint(FIPv4Address::Any, ListeningPort);
 
-	// Create TCP listener
+	// Create TCP listener socket
 	TcpListener = MakeShareable(new FTcpListener(Endpoint));
 
-	// Set connection accepted delegate
+	// Bind connection accepted delegate to our handler function
 	TcpListener->OnConnectionAccepted().BindUObject(this, &ADSLightSyncer::HandleConnectionAccepted);
 
-	// Start listening
+	// Start listening for connections
 	if (TcpListener->IsActive())
 	{
 		bIsListening = true;
-		UE_LOG(LogTemp, Log, TEXT("Started TCP listener on port %d"), ListeningPort);
+		UE_LOG(LogTemp, Log, TEXT("Started TCP listener on port %d - Ready to receive light data from Rhino"), ListeningPort);
 	}
 	else
 	{
@@ -73,6 +111,11 @@ void ADSLightSyncer::StartTcpListener()
 	}
 }
 
+/**
+ * @brief Stops the TCP listener
+ * 
+ * Gracefully shuts down the TCP listener and cleans up resources.
+ */
 void ADSLightSyncer::StopTcpListener()
 {
 	if (!bIsListening)
@@ -87,9 +130,19 @@ void ADSLightSyncer::StopTcpListener()
 	}
 
 	bIsListening = false;
-	UE_LOG(LogTemp, Log, TEXT("Stopped TCP listener"));
+	UE_LOG(LogTemp, Log, TEXT("Stopped TCP listener - No longer receiving light data"));
 }
 
+/**
+ * @brief Handles incoming TCP connections from Rhino
+ * 
+ * Called automatically when Rhino connects to send light data.
+ * Reads the JSON data in a background thread and queues it for processing.
+ * 
+ * @param Socket The connected socket from Rhino
+ * @param Endpoint The endpoint information of the connection
+ * @return True if connection was handled successfully
+ */
 bool ADSLightSyncer::HandleConnectionAccepted(FSocket* Socket, const FIPv4Endpoint& Endpoint)
 {
 	if (!Socket)
@@ -97,22 +150,22 @@ bool ADSLightSyncer::HandleConnectionAccepted(FSocket* Socket, const FIPv4Endpoi
 		return false;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("TCP connection accepted from %s"), *Endpoint.ToString());
+	UE_LOG(LogTemp, Log, TEXT("TCP connection accepted from Rhino at %s"), *Endpoint.ToString());
 
-	// Handle the connection in a separate thread
+	// Handle the connection in a background thread to avoid blocking the game thread
 	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, Socket]()
 	{
-		// Set socket to blocking mode with timeout
+		// Configure socket for data reception
 		Socket->SetNonBlocking(false);
 		int32 BufferSize = 65536;
 		Socket->SetReceiveBufferSize(BufferSize, BufferSize);
 
-		// Read data
+		// Read incoming JSON data from Rhino
 		TArray<uint8> ReceivedData;
 		uint8 Buffer[4096];
 		int32 BytesRead = 0;
 
-		// Keep reading until we get all data or timeout
+		// Keep reading until we get all data or connection closes
 		while (Socket->Recv(Buffer, sizeof(Buffer), BytesRead))
 		{
 			if (BytesRead > 0)
@@ -125,23 +178,24 @@ bool ADSLightSyncer::HandleConnectionAccepted(FSocket* Socket, const FIPv4Endpoi
 			}
 		}
 
-		// Close the socket
+		// Close the socket after receiving data
 		Socket->Close();
 
-		// Convert received data to string
+		// Convert received binary data to string
 		if (ReceivedData.Num() > 0)
 		{
 			FString ReceivedString = FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(ReceivedData.GetData())));
 			
-			// Add null terminator if not present
+			// Ensure proper null termination for string conversion
 			if (ReceivedData.Last() != 0)
 			{
 				ReceivedString = FString(ReceivedData.Num(), UTF8_TO_TCHAR(reinterpret_cast<const char*>(ReceivedData.GetData())));
 			}
 
-			UE_LOG(LogTemp, Log, TEXT("Received JSON data: %s"), *ReceivedString);
+			UE_LOG(LogTemp, Log, TEXT("Received light data JSON from Rhino: %s"), *ReceivedString);
 
-			// Queue the data for processing in the game thread
+			// Queue the JSON data for processing in the game thread
+			// This ensures thread-safe light manipulation
 			IncomingDataQueue.Enqueue(ReceivedString);
 		}
 	});
@@ -149,6 +203,12 @@ bool ADSLightSyncer::HandleConnectionAccepted(FSocket* Socket, const FIPv4Endpoi
 	return true;
 }
 
+/**
+ * @brief Processes queued light data in the game thread
+ * 
+ * Called every frame to process any JSON light data received from Rhino.
+ * Ensures all light operations happen in the game thread for thread safety.
+ */
 void ADSLightSyncer::ProcessQueuedData()
 {
 	FString JsonData;
@@ -158,43 +218,60 @@ void ADSLightSyncer::ProcessQueuedData()
 	}
 }
 
+/**
+ * @brief Processes received light data from Rhino
+ * 
+ * Parses the JSON light data and spawns/updates lights in the Unreal scene.
+ * 
+ * @param JsonData The JSON string containing light information from Rhino
+ */
 void ADSLightSyncer::ProcessReceivedLightData(const FString& JsonData)
 {
-	// Parse the JSON data
+	// Parse the JSON data from Rhino
 	FRhinoLightData LightData = ParseJsonLightData(JsonData);
 	
 	if (!LightData.bIsValid)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Failed to parse received light data"));
+		UE_LOG(LogTemp, Warning, TEXT("Failed to parse received light data from Rhino"));
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Processing light event: %s with %d lights"), 
+	UE_LOG(LogTemp, Log, TEXT("Processing light event from Rhino: %s with %d lights"), 
 		*LightData.EventType, LightData.LightCount);
 
-	// Spawn lights from the received data
+	// Spawn/update lights from the received data
 	SpawnLightsFromJsonData(LightData);
 }
 
+/**
+ * @brief Parses JSON light data received from Rhino
+ * 
+ * Converts the simplified JSON structure from Rhino into Unreal-compatible data structures.
+ * Handles the streamlined format that includes rotation directly.
+ * 
+ * @param JsonData The JSON string from Rhino
+ * @return Parsed light data structure
+ */
 ADSLightSyncer::FRhinoLightData ADSLightSyncer::ParseJsonLightData(const FString& JsonData)
 {
 	FRhinoLightData Result;
 	Result.bIsValid = false;
 
-	// Parse JSON
+	// Parse the JSON string into an object
 	TSharedPtr<FJsonObject> JsonObject;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonData);
 
 	if (!FJsonSerializer::Deserialize(Reader, JsonObject) || !JsonObject.IsValid())
 	{
-		UE_LOG(LogTemp, Error, TEXT("Failed to parse JSON data"));
+		UE_LOG(LogTemp, Error, TEXT("Failed to parse JSON data from Rhino"));
 		return Result;
 	}
 
-	// Extract main fields
+	// Extract main fields from simplified JSON structure
 	Result.EventType = JsonObject->GetStringField(TEXT("event"));
-	Result.Timestamp = JsonObject->GetStringField(TEXT("timestamp"));
 	Result.LightCount = JsonObject->GetIntegerField(TEXT("lightCount"));
+
+	UE_LOG(LogTemp, Log, TEXT("Parsing Rhino event: %s with %d lights"), *Result.EventType, Result.LightCount);
 
 	// Parse lights array
 	const TArray<TSharedPtr<FJsonValue>>* LightsArray;
@@ -214,10 +291,30 @@ ADSLightSyncer::FRhinoLightData ADSLightSyncer::ParseJsonLightData(const FString
 		}
 	}
 
+	// Validate that we parsed the expected number of lights
 	Result.bIsValid = (Result.Lights.Num() == Result.LightCount);
+	
+	if (Result.bIsValid)
+	{
+		UE_LOG(LogTemp, Log, TEXT("Successfully parsed %d lights from Rhino"), Result.Lights.Num());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("Light count mismatch: expected %d, parsed %d"), Result.LightCount, Result.Lights.Num());
+	}
+
 	return Result;
 }
 
+/**
+ * @brief Parses individual light data from JSON
+ * 
+ * Extracts position, rotation, intensity, color and spotlight parameters
+ * from the simplified JSON structure sent by Rhino.
+ * 
+ * @param LightObject JSON object containing a single light's data
+ * @return Parsed light data structure
+ */
 ADSLightSyncer::FLightData ADSLightSyncer::ParseJsonLight(const TSharedPtr<FJsonObject>& LightObject)
 {
 	FLightData Result;
@@ -228,40 +325,60 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseJsonLight(const TSharedPtr<FJson
 		return Result;
 	}
 
-	// Parse light type
+	// Parse light type (Point, Directional, Spot)
 	Result.LightType = LightObject->GetStringField(TEXT("type"));
 
-	// Parse location
+	// Parse location from Rhino (coordinates are in meters)
 	const TSharedPtr<FJsonObject>* LocationObject;
 	if (LightObject->TryGetObjectField(TEXT("location"), LocationObject) && LocationObject->IsValid())
 	{
-		float X = (*LocationObject)->GetNumberField(TEXT("y"));
-		float Y = (*LocationObject)->GetNumberField(TEXT("x"));// opposite for rhino
-		float Z = (*LocationObject)->GetNumberField(TEXT("z"));
+		// Rhino coordinates to Unreal coordinates conversion
+		// Rhino: X=Right, Y=Forward, Z=Up
+		// Unreal: X=Forward, Y=Right, Z=Up
+		// So we swap X and Y from Rhino to get proper Unreal coordinates
+		float RhinoX = (*LocationObject)->GetNumberField(TEXT("x"));
+		float RhinoY = (*LocationObject)->GetNumberField(TEXT("y"));
+		float RhinoZ = (*LocationObject)->GetNumberField(TEXT("z"));
 		
-		// Convert from Rhino units to UE4 units (cm to UE units)
-		Result.Location = FVector(X * 0.1f, Y * 0.1f, Z * 0.1f);
+		// Convert from meters to Unreal units (1m = 100 Unreal units)
+		// and apply coordinate system conversion
+		Result.Location = FVector(
+			RhinoY * 100.0f,  // Unreal X = Rhino Y
+			RhinoX * 100.0f,  // Unreal Y = Rhino X  
+			RhinoZ * 100.0f   // Unreal Z = Rhino Z
+		);
 	}
 
-	// Parse direction and convert to rotation
-	const TSharedPtr<FJsonObject>* DirectionObject;
-	if (LightObject->TryGetObjectField(TEXT("direction"), DirectionObject) && DirectionObject->IsValid())
+	// Parse rotation directly from Rhino (no complex conversion needed)
+	const TSharedPtr<FJsonObject>* RotationObject;
+	if (LightObject->TryGetObjectField(TEXT("rotation"), RotationObject) && RotationObject->IsValid())
 	{
-		float X = (*DirectionObject)->GetNumberField(TEXT("y"));
-		float Y = (*DirectionObject)->GetNumberField(TEXT("x"));
-		float Z = (*DirectionObject)->GetNumberField(TEXT("z"));
+		// Get rotation values in degrees from Rhino
+		float Pitch = (*RotationObject)->GetNumberField(TEXT("pitch"));
+		float Yaw = (*RotationObject)->GetNumberField(TEXT("yaw"));
+		float Roll = (*RotationObject)->GetNumberField(TEXT("roll"));
 		
-		FVector Direction(X, Y, Z);
-		Direction.Normalize();
+		// Direct rotation conversion from Rhino to Unreal
+		// Rhino and Unreal both use: Pitch (X-axis), Yaw (Z-axis), Roll (Y-axis)
+		// However, coordinate system differences require adjustment:
+		// - Rhino: X=Right, Y=Forward, Z=Up
+		// - Unreal: X=Forward, Y=Right, Z=Up
+		Result.Rotation = FRotator(
+			Pitch,   // Keep pitch as-is
+			Yaw ,     // Subtract 90 degrees to align coordinate systems
+			Roll     // Keep roll as-is
+		);
 		
-		// Convert direction vector to rotation
-		Result.Rotation = Direction.Rotation();
+		UE_LOG(LogTemp, Log, TEXT("Parsed rotation from JSON - Pitch: %.3f, Yaw: %.3f, Roll: %.3f"), 
+			Pitch, Yaw, Roll);
+		UE_LOG(LogTemp, Log, TEXT("Applied rotation to Unreal - Pitch: %.3f, Yaw: %.3f, Roll: %.3f"), 
+			Result.Rotation.Pitch, Result.Rotation.Yaw, Result.Rotation.Roll);
 	}
 
-	// Parse intensity
+	// Parse intensity value
 	Result.Intensity = LightObject->GetNumberField(TEXT("intensity"));
 
-	// Parse color
+	// Parse RGB color values (0-255 range from Rhino)
 	const TSharedPtr<FJsonObject>* ColorObject;
 	if (LightObject->TryGetObjectField(TEXT("color"), ColorObject) && ColorObject->IsValid())
 	{
@@ -269,87 +386,157 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseJsonLight(const TSharedPtr<FJson
 		int32 G = (*ColorObject)->GetIntegerField(TEXT("g"));
 		int32 B = (*ColorObject)->GetIntegerField(TEXT("b"));
 		
+		// Convert from 0-255 range to 0-1 range for Unreal
 		Result.Color = FLinearColor(R / 255.0f, G / 255.0f, B / 255.0f, 1.0f);
 	}
 
-	// Parse spot light angles if present
+	// Parse spotlight parameters if present
 	const TSharedPtr<FJsonObject>* SpotLightObject;
 	if (LightObject->TryGetObjectField(TEXT("spotLight"), SpotLightObject) && SpotLightObject->IsValid())
 	{
 		Result.InnerAngle = (*SpotLightObject)->GetNumberField(TEXT("innerAngle"));
 		Result.OuterAngle = (*SpotLightObject)->GetNumberField(TEXT("outerAngle"));
 	}
+	else
+	{
+		// Default spotlight values for non-spot lights
+		Result.InnerAngle = 0.0f;
+		Result.OuterAngle = 45.0f;
+	}
 
 	Result.bIsValid = true;
+	UE_LOG(LogTemp, VeryVerbose, TEXT("Parsed %s light at location %s with rotation %s"), 
+		*Result.LightType, *Result.Location.ToString(), *Result.Rotation.ToString());
+
 	return Result;
 }
 
+/**
+ * @brief Spawns light actors in Unreal from Rhino data
+ * 
+ * Clears existing lights and creates new ones based on the received data.
+ * Handles Point, Directional, and Spot light types with proper conversion
+ * of intensity values and spotlight parameters.
+ * 
+ * @param LightData The parsed light data from Rhino
+ */
 void ADSLightSyncer::SpawnLightsFromJsonData(const FRhinoLightData& LightData)
 {
-	// Clear existing lights first
+	// Clear existing lights first to avoid duplicates
 	ClearExistingLights();
 
-	// Spawn each light
-	for (const FLightData& Light : LightData.Lights)
+	UE_LOG(LogTemp, Log, TEXT("Spawning %d lights from Rhino event: %s"), LightData.Lights.Num(), *LightData.EventType);
+
+	// Spawn each light based on its type
+	for (int32 LightIndex = 0; LightIndex < LightData.Lights.Num(); LightIndex++)
 	{
+		const FLightData& Light = LightData.Lights[LightIndex];
 		AActor* SpawnedLightActor = nullptr;
 		
 		if (Light.LightType == TEXT("Point"))
 		{
-			APointLight* PointLightActor = GetWorld()->SpawnActor<APointLight>(APointLight::StaticClass(), Light.Location, Light.Rotation);
+			// Create Point Light
+			APointLight* PointLightActor = GetWorld()->SpawnActor<APointLight>(
+				APointLight::StaticClass(), 
+				Light.Location, 
+				FRotator::ZeroRotator
+			);
+			
 			if (PointLightActor)
 			{
+				// Configure point light properties
+				// Multiply intensity for better visibility in Unreal
 				PointLightActor->GetLightComponent()->SetIntensity(Light.Intensity * 1000.0f);
 				PointLightActor->GetLightComponent()->SetLightColor(Light.Color);
 				PointLightActor->GetLightComponent()->SetMobility(EComponentMobility::Movable);
+				PointLightActor->GetLightComponent()->SetWorldRotation(Light.Rotation);
 				SpawnedLightActor = PointLightActor;
+				
+				UE_LOG(LogTemp, Log, TEXT("Created Point Light %d at %s"), LightIndex, *Light.Location.ToString());
 			}
 		}
 		else if (Light.LightType == TEXT("Directional"))
 		{
-			ADirectionalLight* DirLightActor = GetWorld()->SpawnActor<ADirectionalLight>(ADirectionalLight::StaticClass(), Light.Location, Light.Rotation);
+			// Create Directional Light (like sun light)
+			ADirectionalLight* DirLightActor = GetWorld()->SpawnActor<ADirectionalLight>(
+				ADirectionalLight::StaticClass(), 
+				Light.Location,
+				FRotator::ZeroRotator
+			);
+			
 			if (DirLightActor)
 			{
+				// Configure directional light properties
+				// Use lower multiplier for directional lights as they affect entire scene
 				DirLightActor->GetLightComponent()->SetIntensity(Light.Intensity * 10.0f);
 				DirLightActor->GetLightComponent()->SetLightColor(Light.Color);
 				DirLightActor->GetLightComponent()->SetMobility(EComponentMobility::Movable);
+				DirLightActor->GetLightComponent()->SetWorldRotation(Light.Rotation);
 				SpawnedLightActor = DirLightActor;
+				
+				UE_LOG(LogTemp, Log, TEXT("Created Directional Light %d with intensity %.2f and rotation %s"), 
+					LightIndex, Light.Intensity * 10.0f, *Light.Rotation.ToString());
 			}
 		}
 		else if (Light.LightType == TEXT("Spot"))
 		{
-			ASpotLight* SpotLightActor = GetWorld()->SpawnActor<ASpotLight>(ASpotLight::StaticClass(), Light.Location, Light.Rotation);
+			// Create Spot Light with cone angles
+			ASpotLight* SpotLightActor = GetWorld()->SpawnActor<ASpotLight>(
+				ASpotLight::StaticClass(), 
+				Light.Location, 
+				Light.Rotation
+			);
+			
 			if (SpotLightActor)
 			{
 				USpotLightComponent* SpotComponent = SpotLightActor->SpotLightComponent;
+				
+				// Configure spotlight properties
 				SpotComponent->SetIntensity(Light.Intensity * 1000.0f);
 				SpotComponent->SetLightColor(Light.Color);
 				SpotComponent->SetMobility(EComponentMobility::Movable);
-				
-				// Set spot light angles
+				SpotComponent->SetWorldRotation(Light.Rotation);
+				// Set spotlight cone angles from Rhino data
 				SpotComponent->SetInnerConeAngle(Light.InnerAngle);
 				SpotComponent->SetOuterConeAngle(Light.OuterAngle);
 				
 				SpawnedLightActor = SpotLightActor;
+				
+				UE_LOG(LogTemp, Log, TEXT("Created Spot Light %d at %s with inner angle %.1f° and outer angle %.1f°"), 
+					LightIndex, *Light.Location.ToString(), Light.InnerAngle, Light.OuterAngle);
 			}
 		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Unknown light type '%s' at index %d"), *Light.LightType, LightIndex);
+			continue;
+		}
 		
+		// Add successfully created light to our tracking array
 		if (SpawnedLightActor)
 		{
 			SpawnedLights.Add(SpawnedLightActor);
-			UE_LOG(LogTemp, Log, TEXT("Spawned %s light at %s"), 
-				*Light.LightType, *Light.Location.ToString());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("Failed to spawn %s light at index %d"), *Light.LightType, LightIndex);
 		}
 	}
 	
-	UE_LOG(LogTemp, Log, TEXT("Light sync completed from JSON. Spawned %d lights for event: %s"), 
-		SpawnedLights.Num(), *LightData.EventType);
+	UE_LOG(LogTemp, Log, TEXT("Light synchronization completed. Successfully spawned %d/%d lights from Rhino"), 
+		SpawnedLights.Num(), LightData.Lights.Num());
 }
 
-// Keep existing file-based functions
+// Legacy file-based functions (kept for backwards compatibility)
+/**
+ * @brief Legacy function to load lights from file
+ * 
+ * This function maintains compatibility with the original file-based workflow.
+ * It reads light data from a text file instead of TCP.
+ */
 void ADSLightSyncer::LoadAndSpawnLights()
 {
-	UE_LOG(LogTemp, Warning, TEXT("Starting light sync from: %s"), *LightFilePath);
+	UE_LOG(LogTemp, Warning, TEXT("Starting legacy light sync from file: %s"), *LightFilePath);
 
 	// Clear any existing lights before spawning new ones
 	ClearExistingLights();
@@ -375,7 +562,7 @@ void ADSLightSyncer::LoadAndSpawnLights()
 			continue;
 		}
 		
-		// Parse the line using a more flexible approach
+		// Parse the line using the legacy format
 		FLightData ParsedLight = ParseLightLine(Line);
 		if (!ParsedLight.bIsValid)
 		{
@@ -402,7 +589,6 @@ void ADSLightSyncer::LoadAndSpawnLights()
 			ADirectionalLight* DirLightActor = GetWorld()->SpawnActor<ADirectionalLight>(ADirectionalLight::StaticClass(), ParsedLight.Location, ParsedLight.Rotation);
 			if (DirLightActor)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("Created directional light with intensity: %f"), ParsedLight.Intensity);
 				DirLightActor->GetLightComponent()->SetIntensity(ParsedLight.Intensity * 10.0f);
 				DirLightActor->GetLightComponent()->SetLightColor(ParsedLight.Color);
 				DirLightActor->GetLightComponent()->SetMobility(EComponentMobility::Movable);
@@ -423,8 +609,6 @@ void ADSLightSyncer::LoadAndSpawnLights()
 				SpotComponent->SetInnerConeAngle(ParsedLight.InnerAngle);
 				SpotComponent->SetOuterConeAngle(ParsedLight.OuterAngle);
 				
-				UE_LOG(LogTemp, Log, TEXT("Set spot light angles - Inner: %f°, Outer: %f°"), ParsedLight.InnerAngle, ParsedLight.OuterAngle);
-				
 				SpawnedLightActor = SpotLightActor;
 			}
 		}
@@ -437,17 +621,18 @@ void ADSLightSyncer::LoadAndSpawnLights()
 			
 			// Add to spawned lights array for cleanup
 			SpawnedLights.Add(SpawnedLightActor);
-			
-			UE_LOG(LogTemp, Log, TEXT("Created %s light at location: %s with color: %s"), 
-				*ParsedLight.LightType, 
-				*ParsedLight.Location.ToString(),
-				*ParsedLight.Color.ToString());
 		}
 	}
 	
-	UE_LOG(LogTemp, Warning, TEXT("Light sync completed. Spawned %d lights."), SpawnedLights.Num());
+	UE_LOG(LogTemp, Warning, TEXT("Legacy light sync completed. Spawned %d lights."), SpawnedLights.Num());
 }
 
+/**
+ * @brief Destroys all previously spawned lights
+ * 
+ * Cleans up all light actors created by this syncer to prepare for new lights.
+ * Called before spawning new lights to avoid duplicates.
+ */
 void ADSLightSyncer::ClearExistingLights()
 {
 	// Destroy all previously spawned lights
@@ -459,12 +644,18 @@ void ADSLightSyncer::ClearExistingLights()
 		}
 	}
 	
-	// Clear the array
+	// Clear the tracking array
 	SpawnedLights.Empty();
 	
-	UE_LOG(LogTemp, Log, TEXT("Cleared existing lights"));
+	UE_LOG(LogTemp, Log, TEXT("Cleared %d existing lights"), SpawnedLights.Num());
 }
 
+/**
+ * @brief Legacy function to parse light data from text file format
+ * 
+ * Parses the old text-based format for backwards compatibility.
+ * New implementations should use the JSON-based TCP approach.
+ */
 ADSLightSyncer::FLightData ADSLightSyncer::ParseLightLine(const FString& Line)
 {
 	FLightData Result;
@@ -528,9 +719,9 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseLightLine(const FString& Line)
 	}
 	
 	// Convert to FVector (Rhino to UE4 coordinate conversion)
-	Result.Location.X = Location.X * 0.1f; // Convert cm to UE units
-	Result.Location.Y = Location.Y * 0.1f;
-	Result.Location.Z = Location.Z * 0.1f;
+	Result.Location.X = Location.Y; 
+	Result.Location.Y = Location.X;
+	Result.Location.Z = Location.Z;
 	
 	// Parse rotation: (pitch°, yaw°, roll°)
 	Result.Rotation = ParseRotationString(Components[2]);
@@ -562,6 +753,7 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseLightLine(const FString& Line)
 	return Result;
 }
 
+// Legacy parsing helper functions (kept for file-based compatibility)
 FVector ADSLightSyncer::ParseVectorString(const FString& VectorStr)
 {
 	// Parse vector format: (x,y,z)
@@ -603,8 +795,8 @@ FRotator ADSLightSyncer::ParseRotationString(const FString& RotationStr)
 	}
 	
 	// Convert Rhino rotation to UE4 rotation (may need adjustment based on coordinate system)
-	float Roll = FCString::Atof(*RotationParts[0].TrimStartAndEnd());
-	float Pitch = FCString::Atof(*RotationParts[1].TrimStartAndEnd());
+	float Roll = FCString::Atof(*RotationParts[1].TrimStartAndEnd());
+	float Pitch = FCString::Atof(*RotationParts[0].TrimStartAndEnd());
 	float Yaw = FCString::Atof(*RotationParts[2].TrimStartAndEnd());
 	
 	return FRotator(Pitch, Yaw, Roll);
