@@ -864,7 +864,13 @@ void UDSRuntimeWidget::OnLightSyncPressed()
         LogError(TEXT("Cannot update lightsync - no DSLightSyncer found"));
         return;
     }
-
+    // First time light sync check
+    if (FirstTimeLightSync)
+    {
+        FirstTimeLightSync = false;
+        CurrentDSLightSyncer->LoadAndSpawnLights();
+    }
+    
     CurrentDSLightSyncer->StartTcpListener();
 }
 

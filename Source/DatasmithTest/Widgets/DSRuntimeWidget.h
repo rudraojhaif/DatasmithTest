@@ -122,6 +122,9 @@ protected:
     TObjectPtr<UButton> SyncLightButton;
 
 private:
+    // === Utility ===
+    bool FirstTimeLightSync = true;
+    
     // === Component References ===
     
     /** Weak reference to the current DSPawn in the world */

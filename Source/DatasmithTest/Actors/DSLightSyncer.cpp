@@ -343,8 +343,8 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseJsonLight(const TSharedPtr<FJson
 		// Convert from meters to Unreal units (1m = 100 Unreal units)
 		// and apply coordinate system conversion
 		Result.Location = FVector(
-			RhinoY * 100.0f,  // Unreal X = Rhino Y
-			RhinoX * 100.0f,  // Unreal Y = Rhino X  
+			RhinoX * 100.0f,  // Unreal X = Rhino X
+			-RhinoY * 100.0f, // Unreal Y = -Rhino Y (negated for coordinate system conversion)
 			RhinoZ * 100.0f   // Unreal Z = Rhino Z
 		);
 	}
@@ -365,7 +365,7 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseJsonLight(const TSharedPtr<FJson
 		// - Unreal: X=Forward, Y=Right, Z=Up
 		Result.Rotation = FRotator(
 			Pitch,   // Keep pitch as-is
-			Yaw ,     // Subtract 90 degrees to align coordinate systems
+			-Yaw,    // Negate yaw for coordinate system conversion
 			Roll     // Keep roll as-is
 		);
 		
@@ -718,10 +718,10 @@ ADSLightSyncer::FLightData ADSLightSyncer::ParseLightLine(const FString& Line)
 		return Result;
 	}
 	
-	// Convert to FVector (Rhino to UE4 coordinate conversion)
-	Result.Location.X = Location.Y; 
-	Result.Location.Y = Location.X;
-	Result.Location.Z = Location.Z;
+	// Convert to FVector (Rhino to UE4 coordinate conversion) - NOW CONSISTENT WITH JSON PARSING
+	Result.Location.X = Location.X * 100.0f;     // Convert to Unreal units (cm)
+	Result.Location.Y = -Location.Y * 100.0f;    // Negate Y and convert to Unreal units (cm)
+	Result.Location.Z = Location.Z * 100.0f;     // Convert to Unreal units (cm)
 	
 	// Parse rotation: (pitch°, yaw°, roll°)
 	Result.Rotation = ParseRotationString(Components[2]);
@@ -794,12 +794,17 @@ FRotator ADSLightSyncer::ParseRotationString(const FString& RotationStr)
 		return FRotator::ZeroRotator;
 	}
 	
-	// Convert Rhino rotation to UE4 rotation (may need adjustment based on coordinate system)
-	float Roll = FCString::Atof(*RotationParts[1].TrimStartAndEnd());
+	// Convert Rhino rotation to UE4 rotation - NOW CONSISTENT WITH JSON PARSING
 	float Pitch = FCString::Atof(*RotationParts[0].TrimStartAndEnd());
-	float Yaw = FCString::Atof(*RotationParts[2].TrimStartAndEnd());
+	float Yaw = FCString::Atof(*RotationParts[1].TrimStartAndEnd());
+	float Roll = FCString::Atof(*RotationParts[2].TrimStartAndEnd());
 	
-	return FRotator(Pitch, Yaw, Roll);
+	// Apply the same coordinate system conversion as JSON parsing
+	return FRotator(
+		Pitch,  // Keep pitch as-is
+		-Yaw,   // Negate yaw for coordinate system conversion
+		Roll    // Keep roll as-is
+	);
 }
 
 FLinearColor ADSLightSyncer::ParseColorString(const FString& ColorStr)
